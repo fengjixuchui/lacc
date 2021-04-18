@@ -59,11 +59,13 @@ static struct block *parameter_list(
     Type base,
     Type *func)
 {
+    static String dots = SHORT_STRING_INIT("...");
+
     String name;
     size_t length;
-    int is_register;
     struct block *block;
     struct member *param;
+    struct declaration_specifier_info info;
 
     *func = type_create_function(base);
     block = current_scope_depth(&ns_ident) == 1
@@ -71,9 +73,14 @@ static struct block *parameter_list(
         : cfg_block_init(def);
 
     while (peek().token != ')') {
-        name.len = 0;
+        name = str_empty();
         length = 0;
-        base = declaration_specifiers(NULL, NULL, &is_register);
+        base = declaration_specifiers(&info);
+        if (info.storage_class) {
+            error("Unexpected storage class in parameter list.");
+        } else if (info.is_inline) {
+            error("Parameter cannot be declared inline.");
+        }
         block = parameter_declarator(def, block, base, &base, &name, &length);
         if (is_void(base)) {
             if (nmembers(*func)) {
@@ -89,7 +96,7 @@ static struct block *parameter_list(
         }
         param = type_add_member(*func, name, base);
         param->offset = length;
-        if (name.len) {
+        if (!str_is_empty(name)) {
             param->sym =
                 sym_add(&ns_ident, name, base, SYM_DEFINITION, LINK_NONE);
         }
@@ -100,7 +107,7 @@ static struct block *parameter_list(
         if (peek().token == DOTS) {
             consume(DOTS);
             assert(!is_vararg(*func));
-            type_add_member(*func, str_init("..."), basic_type__void);
+            type_add_member(*func, dots, basic_type__void);
             assert(is_vararg(*func));
             break;
         }
@@ -419,9 +426,9 @@ static void member_declaration_list(Type type)
     Type decl_base, decl_type;
 
     do {
-        decl_base = declaration_specifiers(NULL, NULL, NULL);
+        decl_base = declaration_specifiers(NULL);
         while (1) {
-            name.len = 0;
+            name = str_empty();
             declarator(NULL, NULL, decl_base, &decl_type, &name);
             if (is_struct_or_union(type) && peek().token == ':') {
                 if (!is_integer(decl_type)) {
@@ -435,7 +442,7 @@ static void member_declaration_list(Type type)
                     exit(1);
                 }
                 type_add_field(type, name, decl_type, expr.imm.u);
-            } else if (!name.len) {
+            } else if (str_is_empty(name)) {
                 if (is_struct_or_union(decl_type)) {
                     type_add_anonymous_member(type, decl_type);
                 } else {
@@ -613,10 +620,7 @@ static void enum_declaration(void)
  *     enum specifier
  *     typedef name
  */
-INTERNAL Type declaration_specifiers(
-    int *storage_class,
-    int *is_inline,
-    int *is_register)
+INTERNAL Type declaration_specifiers(struct declaration_specifier_info *info)
 {
     Type type = {0};
     const Type *tagged;
@@ -650,9 +654,9 @@ INTERNAL Type declaration_specifiers(
         Q_CONST_VOLATILE = Q_CONST | Q_VOLATILE
     } qual = 0;
 
-    if (storage_class) *storage_class = '$';
-    if (is_inline) *is_inline = 0;
-    if (is_register) *is_register = 0;
+    if (info) {
+        memset(info, 0, sizeof(*info));
+    }
 
     while (1) {
         switch ((tok = peek()).token) {
@@ -735,6 +739,9 @@ INTERNAL Type declaration_specifiers(
             next();
             type = *tagged;
             base = B_AGGREGATE;
+            if (info) {
+                info->from_typedef = 1;
+            }
             break;
         case UNION:
         case STRUCT:
@@ -751,22 +758,22 @@ INTERNAL Type declaration_specifiers(
             break;
         case INLINE:
             next();
-            if (!is_inline) {
+            if (!info) {
                 error("Unexpected 'inline' specifier.");
-            } else if (*is_inline) {
+            } else if (info->is_inline) {
                 error("Multiple 'inline' specifiers.");
             } else {
-                *is_inline = 1;
+                info->is_inline = 1;
             }
             break;
         case REGISTER:
             next();
-            if (!is_register) {
+            if (!info) {
                 error("Unexpected 'register' specifier.");
-            } else if (*is_register) {
+            } else if (info->is_register) {
                 error("Multiple 'register' specifiers.");
             } else {
-                *is_register = 1;
+                info->is_register = 1;
             }
             break;
         case AUTO:
@@ -774,12 +781,12 @@ INTERNAL Type declaration_specifiers(
         case EXTERN:
         case TYPEDEF:
             next();
-            if (!storage_class) {
+            if (!info) {
                 error("Unexpected storage class in qualifier list.");
-            } else if (*storage_class != '$') {
+            } else if (info->storage_class) {
                 error("Multiple storage class specifiers.");
             } else {
-                *storage_class = tok.token;
+                info->storage_class = tok.token;
             }
             break;
         default:
@@ -845,12 +852,14 @@ static void define_builtin__func__(String name)
 {
     Type type;
     struct symbol *sym;
+    size_t len;
 
     static String func = SHORT_STRING_INIT("__func__");
 
     assert(current_scope_depth(&ns_ident) == 1);
     if (context.standard >= STD_C99) {
-        type = type_create_array(basic_type__char, (size_t) name.len + 1);
+        len = str_len(name);
+        type = type_create_array(basic_type__char, len + 1);
         sym = sym_add(&ns_ident, func, type, SYM_LITERAL, LINK_INTERN);
         sym->value.string = name;
     }
@@ -864,7 +873,7 @@ static void ensure_main_returns_zero(
 
     assert(is_function(sym->type));
     assert(!sym->n);
-    if (context.standard < STD_C99 || str_cmp(name, sym->name))
+    if (context.standard < STD_C99 || !str_eq(name, sym->name))
         return;
 
     if (!block->has_return_value) {
@@ -904,7 +913,7 @@ static struct block *parameter_declaration_list(
     def->symbol = NULL;
     for (i = 0; i < nmembers(type); ++i) {
         param = get_member(type, i);
-        if (!param->name.len) {
+        if (str_is_empty(param->name)) {
             error("Missing parameter name at position %d.", i + 1);
             exit(1);
         }
@@ -941,7 +950,7 @@ static struct block *make_parameters_visible(
 
     for (i = 0; i < nmembers(def->symbol->type); ++i) {
         param = get_member(def->symbol->type, i);
-        if (!param->name.len) {
+        if (str_is_empty(param->name)) {
             error("Missing parameter at position %d.", i + 1);
             exit(1);
         }
@@ -987,7 +996,7 @@ static struct block *init_declarator(
     enum linkage linkage)
 {
     Type type;
-    String name = {0};
+    String name = SHORT_STRING_INIT("");
     struct symbol *sym;
     const struct member *param;
 
@@ -997,7 +1006,7 @@ static struct block *init_declarator(
         parent = declarator(def, parent, base, &type, &name);
     }
 
-    if (!name.len) {
+    if (str_is_empty(name)) {
         return parent;
     }
 
@@ -1153,12 +1162,12 @@ INTERNAL struct block *declaration(
     struct definition *def,
     struct block *parent)
 {
-    Type base;
+    Type base, type;
     enum symtype symtype;
     enum linkage linkage;
     struct definition *decl;
     struct symbol *sym;
-    int storage_class, is_inline, is_register;
+    struct declaration_specifier_info info;
 
     if (peek().token == STATIC_ASSERT) {
         static_assertion();
@@ -1166,8 +1175,8 @@ INTERNAL struct block *declaration(
         return parent;
     }
 
-    base = declaration_specifiers(&storage_class, &is_inline, &is_register);
-    switch (storage_class) {
+    base = declaration_specifiers(&info);
+    switch (info.storage_class) {
     case EXTERN:
         symtype = SYM_DECLARATION;
         linkage = LINK_EXTERN;
@@ -1202,21 +1211,29 @@ INTERNAL struct block *declaration(
     }
 
     while (1) {
+        type = base;
+        if (info.from_typedef && is_array(base) && !is_complete(base)) {
+            type = type_next(base);
+            type = type_create_incomplete(type);
+            type = type_apply_qualifiers(type, base);
+            assert(type_equal(type, base));
+        }
+
         if (linkage == LINK_INTERN || linkage == LINK_EXTERN) {
             decl = cfg_init();
-            init_declarator(decl, decl->body, base, symtype, linkage);
+            init_declarator(decl, decl->body, type, symtype, linkage);
             if (!decl->symbol) {
                 cfg_discard(decl);
             } else if (is_function(decl->symbol->type)) {
-                if (is_inline) {
+                if (info.is_inline) {
                     sym = (struct symbol *) decl->symbol;
                     sym->inlined = 1;
-                    sym->referenced |= storage_class == EXTERN;
+                    sym->referenced |= info.storage_class == EXTERN;
                 }
                 return parent;
             }
         } else {
-            parent = init_declarator(def, parent, base, symtype, linkage);
+            parent = init_declarator(def, parent, type, symtype, linkage);
         }
 
         if (peek().token == ',') {

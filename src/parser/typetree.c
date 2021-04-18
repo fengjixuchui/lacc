@@ -203,11 +203,13 @@ static Type remove_qualifiers(Type type)
  */
 static struct member *add_member(Type parent, struct member m)
 {
+    static String dots = SHORT_STRING_INIT("...");
+
     struct typetree *t;
 
     assert(is_struct_or_union(parent) || is_function(parent));
     t = get_typetree_handle(parent.ref);
-    if (!str_cmp(m.name, str_init("..."))) {
+    if (str_eq(m.name, dots)) {
         assert(!t->is_vararg);
         assert(is_function(parent));
         t->is_vararg = 1;
@@ -215,7 +217,7 @@ static struct member *add_member(Type parent, struct member m)
         return NULL;
     }
 
-    if (m.name.len && find_type_member(parent, m.name, NULL)) {
+    if (!str_is_empty(m.name) && find_type_member(parent, m.name, NULL)) {
         error("Member '%s' already exists.", str_raw(m.name));
         exit(1);
     }
@@ -283,7 +285,7 @@ static void reset_field_alignment(Type type, Type clear)
     int bits, clear_bits, mod;
     size_t len, clear_size;
     Type backing;
-    String name = {0};
+    String name = SHORT_STRING_INIT("");
     const struct member *m;
 
     assert(is_struct(type));
@@ -707,12 +709,12 @@ INTERNAL void type_add_field(Type parent, String name, Type type, size_t width)
         exit(1);
     }
 
-    if (name.len && !width) {
+    if (!str_is_empty(name) && !width) {
         error("Zero length field %s.", str_raw(name));
         exit(1);
     }
 
-    if (is_union(parent) && name.len == 0) {
+    if (is_union(parent) && str_is_empty(name)) {
         return;
     }
 
@@ -778,7 +780,7 @@ static size_t remove_anonymous_fields(struct typetree *t)
     maxalign = 0;
     for (i = array_len(&t->members) - 1; i >= 0; --i) {
         m = &array_get(&t->members, i);
-        if (m->name.len == 0) {
+        if (str_is_empty(m->name)) {
             array_erase(&t->members, i);
         } else {
             align = type_alignment(m->type);
@@ -907,7 +909,7 @@ static int typetree_equal(const struct typetree *a, const struct typetree *b)
             return 0;
         } else if (a->type != T_FUNCTION) {
             assert(ma->offset == mb->offset);
-            if (str_cmp(ma->name, mb->name)) {
+            if (!str_eq(ma->name, mb->name)) {
                 return 0;
             }
         }
@@ -1130,7 +1132,7 @@ INTERNAL const struct member *find_type_member(
     t = get_typetree_handle(type.ref);
     for (i = 0; i < array_len(&t->members); ++i) {
         member = &array_get(&t->members, i);
-        if (!str_cmp(name, member->name)) {
+        if (str_eq(name, member->name)) {
             if (index) {
                 *index = i;
             }

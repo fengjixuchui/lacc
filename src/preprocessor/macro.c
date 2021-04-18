@@ -18,7 +18,6 @@
 
 #define XSTR(s) STR(s)
 #define STR(s) #s
-#define HASH_TABLE_BUCKETS 1024
 
 static struct hash_table macro_hash_table;
 static int new_macro_added;
@@ -33,7 +32,7 @@ static int is_expanded(const ExpandStack *scope, String name)
 {
     int i;
     for (i = 0; i < array_len(scope); ++i) {
-        if (!str_cmp(array_get(scope, i), name)) {
+        if (str_eq(array_get(scope, i), name)) {
             return 1;
         }
     }
@@ -81,7 +80,7 @@ static int macrocmp(const struct macro *a, const struct macro *b)
     if ((a->type != b->type) || (a->params != b->params))
         return 1;
 
-    if (str_cmp(a->name, b->name))
+    if (!str_eq(a->name, b->name))
         return 1;
 
     if (array_len(&a->replacement) != array_len(&b->replacement))
@@ -97,11 +96,6 @@ static int macrocmp(const struct macro *a, const struct macro *b)
     return 0;
 }
 
-static String macro_hash_key(void *ref)
-{
-    return ((struct macro *) ref)->name;
-}
-
 static void macro_hash_del(void *ref)
 {
     struct macro *macro = (struct macro *) ref;
@@ -109,13 +103,14 @@ static void macro_hash_del(void *ref)
     free(macro);
 }
 
-static void *macro_hash_add(void *ref)
+static void *macro_hash_add(void *ref, String *key)
 {
     struct macro *macro, *arg;
 
     arg = (struct macro *) ref;
     macro = calloc(1, sizeof(*macro));
     *macro = *arg;
+    *key = macro->name;
     /*
      * Signal that the hash table has ownership now, and it will not be
      * freed in define().
@@ -126,19 +121,7 @@ static void *macro_hash_add(void *ref)
 
 INTERNAL void macro_reset(void)
 {
-    static int initialized;
-
-    if (!initialized) {
-        hash_init(
-            &macro_hash_table,
-            HASH_TABLE_BUCKETS,
-            macro_hash_key,
-            macro_hash_add,
-            macro_hash_del);
-        initialized = 1;
-    } else {
-        hash_clear(&macro_hash_table);
-    }
+    hash_clear(&macro_hash_table, macro_hash_del);
 }
 
 INTERNAL void macro_finalize(void)
@@ -169,7 +152,7 @@ static struct token get__line__token(void)
     struct token t = basic_token[PREP_NUMBER];
 
     len = sprintf(buf, "%d", current_file_line);
-    t.d.string = str_register(buf, len);
+    t.d.string = str_intern(buf, len);
     return t;
 }
 
@@ -208,14 +191,14 @@ INTERNAL void define(struct macro macro)
         builtin__line__ = SHORT_STRING_INIT("__LINE__");
 
     new_macro_added = 0;
-    ref = hash_insert(&macro_hash_table, &macro);
+    ref = hash_insert(&macro_hash_table, macro.name, &macro, macro_hash_add);
     if (macrocmp(ref, &macro)) {
         error("Redefinition of macro '%s' with different substitution.",
             str_raw(macro.name));
         exit(1);
     } else {
-        ref->is__file__ = !str_cmp(builtin__file__, ref->name);
-        ref->is__line__ = !str_cmp(builtin__line__, ref->name);
+        ref->is__file__ = str_eq(builtin__file__, ref->name);
+        ref->is__line__ = str_eq(builtin__line__, ref->name);
         if (!new_macro_added) {
             release_token_array(macro.replacement);
         }
@@ -224,7 +207,7 @@ INTERNAL void define(struct macro macro)
 
 INTERNAL void undef(String name)
 {
-    hash_remove(&macro_hash_table, name);
+    hash_remove(&macro_hash_table, name, macro_hash_del);
 }
 
 #if !NDEBUG
@@ -265,19 +248,22 @@ static struct token paste(struct token left, struct token right)
     char *buf;
     const char *endptr;
     String s1, s2;
+    size_t l1, l2;
 
     assert(left.token != NUMBER);
     assert(right.token != NUMBER);
 
     s1 = left.d.string;
     s2 = right.d.string;
+    l1 = str_len(s1);
+    l2 = str_len(s2);
 
-    buf = calloc(s1.len + s2.len + 1, sizeof(*buf));
-    strncpy(buf, str_raw(s1), s1.len);
-    strncpy(buf + s1.len, str_raw(s2), s2.len);
+    buf = calloc(l1 + l2 + 1, sizeof(*buf));
+    strncpy(buf, str_raw(s1), l1);
+    strncpy(buf + l1, str_raw(s2), l2);
 
     right = tokenize(buf, &endptr);
-    if (endptr != buf + s1.len + s2.len) {
+    if (endptr != buf + l1 + l2) {
         error("Invalid token resulting from pasting '%s' and '%s'.",
             str_raw(s1), str_raw(s2));
         exit(1);
@@ -658,7 +644,7 @@ INTERNAL int tok_cmp(struct token a, struct token b)
                 a.d.val.u != b.d.val.u :
                 a.d.val.i != b.d.val.i;
     } else {
-        return str_cmp(a.d.string, b.d.string);
+        return !str_eq(a.d.string, b.d.string);
     }
 }
 
@@ -690,7 +676,7 @@ static char *stringify_concat(
 
     assert(tok.token != NUMBER);
     str = tok.d.string;
-    len = (tok.leading_whitespace != 0) + str.len * 2;
+    len = (tok.leading_whitespace != 0) + str_len(str) * 2;
     if (*pos + len > *cap) {
         *cap = *pos + len;
         buf = realloc(buf, *cap);
@@ -700,6 +686,7 @@ static char *stringify_concat(
         buf[(*pos)++] = ' ';
     }
 
+    len = str_len(str);
     raw = str_raw(str);
     ptr = buf + *pos;
     switch (tok.token) {
@@ -707,18 +694,18 @@ static char *stringify_concat(
     case STRING:
         *ptr++ = '\\';
         *ptr++ = '"';
-        ptr = str_write_escaped(ptr, raw, str.len);
+        ptr = str_write_escaped(ptr, raw, len);
         *ptr++ = '\\';
         *ptr++ = '"';
         break;
     case PREP_CHAR:
         *ptr++ = '\'';
-        ptr = str_write_escaped(ptr, raw, str.len);
+        ptr = str_write_escaped(ptr, raw, len);
         *ptr++ = '\'';
         break;
     default:
-        memcpy(ptr, raw, str.len);
-        ptr += str.len;
+        memcpy(ptr, raw, len);
+        ptr += len;
         break;
     }
 
@@ -743,7 +730,7 @@ INTERNAL struct token stringify(const TokenArray *list)
 
     if (!array_len(list)) {
         str.token = STRING;
-        str.d.string = str_init("");
+        str.d.string = str_empty();
     } else {
         t = array_get(list, 0);
         switch (t.token) {
@@ -781,7 +768,7 @@ INTERNAL struct token stringify(const TokenArray *list)
                 exit(1);
             }
             str.leading_whitespace = array_get(list, 0).leading_whitespace;
-            str.d.string = str_register(buf, ptr);
+            str.d.string = str_intern(buf, ptr);
             free(buf);
             break;
         }
@@ -809,7 +796,7 @@ static void register_macro(const char *key, const char *value)
     struct macro macro = {0};
 
     macro.type = OBJECT_LIKE;
-    macro.name = str_init(key);
+    macro.name = str_intern(key, strlen(key));
     macro.replacement = parse_macro_replacement(value);
     define(macro);
 }

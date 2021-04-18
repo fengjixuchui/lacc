@@ -1470,7 +1470,7 @@ static void allocate_asmblock_registers(
     *sse_regs = 0;
     for (i = 0; i < array_len(&st->clobbers); ++i) {
         str = array_get(&st->clobbers, i);
-        if (!str_cmp(memory, str) || !str_cmp(cc, str)) {
+        if (str_eq(memory, str) || str_eq(cc, str)) {
             continue;
         }
 
@@ -1496,7 +1496,7 @@ static void allocate_asmblock_registers(
             continue;
         }
 
-        if ((str_chr(str, 'r') && !str_chr(str, 'm'))
+        if ((str_has_chr(str, 'r') && !str_has_chr(str, 'm'))
             || op->variable.kind == DEREF)
         {
             if (is_integer(op->variable.type) || is_pointer(op->variable.type)) {
@@ -1521,7 +1521,7 @@ static void allocate_asmblock_registers(
                 }
                 sym->slot = *sse_regs;
             }
-        } else if (!str_chr(str, 'r') && str_chr(str, 'm')) {
+        } else if (!str_has_chr(str, 'r') && str_has_chr(str, 'm')) {
             sym->memory = 1;
         }
     }
@@ -2405,7 +2405,6 @@ static enum reg compile_neg(
     enum reg xmm0, xmm1;
     struct var val;
     union value num = {0};
-    size_t w;
 
     if (is_float(l.type)) {
         if (!c32) {
@@ -2422,8 +2421,7 @@ static enum reg compile_neg(
         val = var_direct(c64);
     }
 
-    w = size_of(l.type);
-    assert(w == size_of(val.type));
+    assert(size_of(l.type) == size_of(val.type));
     xmm0 = load_cast(val, val.type);
     xmm1 = load_cast(l, l.type);
     emit(INSTR_PXOR, OPT_REG_REG, reg(xmm1, 8), reg(xmm0, 8));
@@ -2895,7 +2893,7 @@ static void compile__asm(struct asm_statement st)
     /* Put all variables in register according to constraint. */
     for (i = 0; i < array_len(&st.operands); ++i) {
         op = array_get(&st.operands, i);
-        if (!str_chr(op.constraint, '=')
+        if (!str_has_chr(op.constraint, '=')
             && explicit_reg_constraint(op.constraint, &r))
         {
             load(op.variable, r);
@@ -2907,7 +2905,7 @@ static void compile__asm(struct asm_statement st)
     /* Store variables from register constraint. */
     for (i = 0; i < array_len(&st.operands); ++i) {
         op = array_get(&st.operands, i);
-        if ((str_chr(op.constraint, '=') || str_chr(op.constraint, '+'))
+        if ((str_has_chr(op.constraint, '=') || str_has_chr(op.constraint, '+'))
             && explicit_reg_constraint(op.constraint, &r))
         {
             store(r, op.variable);
@@ -3160,139 +3158,67 @@ static void compile_data_assign(struct var target, struct var val)
 {
     struct immediate imm = {0};
     assert(target.kind == DIRECT);
+    assert(!target.field_offset);
 
-    imm.width = size_of(target.type);
-    switch (val.kind) {
-    case IMMEDIATE:
-        assert(!is_array(target.type));
-        assert(type_equal(target.type, val.type));
-        assert(!val.symbol);
-        imm.type = IMM_INT;
-        if (is_long_double(val.type)) {
-            union {
-                long double val;
-                long arr[2];
-            } cast = {0};
-            imm.width = 8;
-            cast.val = val.imm.ld;
-            imm.d.qword = cast.arr[0];
-            emit_data(imm);
-            imm.d.qword = cast.arr[1] & 0xFFFF;
-        } else {
-            imm.d.qword = val.imm.i;
+    if (is_field(target)) {
+        assert(target.field_width % 8 == 0);
+        assert(val.kind == IMMEDIATE);
+        assert(is_integer(val.type));
+        imm.width = target.field_width / 8;
+        imm.d.qword = val.imm.i;
+    } else {
+        imm.width = size_of(target.type);
+        switch (val.kind) {
+        case IMMEDIATE:
+            assert(!is_array(target.type));
+            assert(type_equal(target.type, val.type));
+            assert(!val.symbol);
+            imm.type = IMM_INT;
+            if (is_long_double(val.type)) {
+                union {
+                    long double val;
+                    long arr[2];
+                } cast = {0};
+                imm.width = 8;
+                cast.val = val.imm.ld;
+                imm.d.qword = cast.arr[0];
+                emit_data(imm);
+                imm.d.qword = cast.arr[1] & 0xFFFF;
+            } else {
+                imm.d.qword = val.imm.i;
+            }
+            break;
+        case DIRECT:
+            assert(val.symbol->symtype == SYM_LITERAL);
+            imm.type = IMM_STRING;
+            imm.d.string = val.symbol->value.string;
+            break;
+        default:
+            assert(val.kind == ADDRESS);
+            assert(val.symbol->linkage != LINK_NONE);
+            imm.type = IMM_ADDR;
+            imm.d.addr = address_of(val);
+            break;
         }
-        break;
-    case DIRECT:
-        assert(val.symbol->symtype == SYM_LITERAL);
-        imm.type = IMM_STRING;
-        imm.d.string = val.symbol->value.string;
-        break;
-    default:
-        assert(val.kind == ADDRESS);
-        assert(val.symbol->linkage != LINK_NONE);
-        imm.type = IMM_ADDR;
-        imm.d.addr = address_of(val);
-        break;
     }
 
     emit_data(imm);
 }
 
-static void zero_fill_data(size_t bytes)
-{
-    static struct immediate
-        zero_byte = {1, IMM_INT},
-        zero_int = {4, IMM_INT},
-        zero_quad = {8, IMM_INT};
-
-    while (bytes >= size_of(basic_type__long)) {
-        emit_data(zero_quad);
-        bytes -= size_of(basic_type__long);
-    }
-
-    while (bytes >= size_of(basic_type__int)) {
-        emit_data(zero_int);
-        bytes -= size_of(basic_type__int);
-    }
-
-    while (bytes > 0) {
-        bytes -= 1;
-        emit_data(zero_byte);
-    }
-}
-
 static void compile_data(struct definition *def)
 {
     int i;
-    long mask;
-    union value value;
-    struct statement st, fl;
-    size_t backing_field_size;
-    size_t
-        total_size = size_of(def->symbol->type),
-        initialized = 0;
+    struct statement st;
 
     enter_context(def->symbol);
     for (i = 0; i < array_len(&def->body->code); ++i) {
         st = array_get(&def->body->code, i);
-        if (st.t.offset > initialized) {
-            zero_fill_data(st.t.offset - initialized);
-        }
-
-        initialized = st.t.offset;
-        if (is_field(st.t)) {
-            backing_field_size = size_of(st.t.type);
-            value.i = 0;
-            fl = st;
-            do {
-                assert(fl.st == IR_ASSIGN);
-                assert(fl.t.kind == DIRECT);
-                assert(fl.t.symbol == def->symbol);
-                assert(is_identity(fl.expr));
-                assert(is_integer(fl.expr.type));
-                assert(fl.expr.l.kind == IMMEDIATE);
-                mask = ((1l << fl.t.field_width) - 1);
-                value.i |= (fl.expr.l.imm.i & mask) << fl.t.field_offset;
-                if (size_of(fl.t.type) > backing_field_size) {
-                    backing_field_size = size_of(fl.t.type);
-                }
-                i += 1;
-                if (i == array_len(&def->body->code))
-                    break;
-                fl = array_get(&def->body->code, i);
-            } while (is_field(fl.t) && fl.t.offset == initialized);
-            i -= 1;
-            switch (backing_field_size) {
-            default: assert(0);
-            case 1:
-                st.t.type = basic_type__char;
-                break;
-            case 2:
-                st.t.type = basic_type__short;
-                break;
-            case 4:
-                st.t.type = basic_type__int;
-                break;
-            case 8:
-                st.t.type = basic_type__long;
-                break;
-            }
-            st.t.field_offset = 0;
-            st.t.field_width = 0;
-            compile_data_assign(st.t, var_numeric(st.t.type, value));
-        } else {
-            assert(st.st == IR_ASSIGN);
-            assert(st.t.kind == DIRECT);
-            assert(st.t.symbol == def->symbol);
-            assert(is_identity(st.expr));
-            compile_data_assign(st.t, st.expr.l);
-        }
-
-        initialized = st.t.offset + size_of(st.t.type);
+        assert(st.st == IR_ASSIGN);
+        assert(st.t.kind == DIRECT);
+        assert(st.t.symbol == def->symbol);
+        assert(is_identity(st.expr));
+        compile_data_assign(st.t, st.expr.l);
     }
-
-    assert(total_size >= initialized);
-    zero_fill_data(total_size - initialized);
 }
 
 static void compile_function(struct definition *def)

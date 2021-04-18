@@ -321,17 +321,29 @@ INTERNAL int asm_text(struct instruction instr)
 
 INTERNAL int asm_data(struct immediate data)
 {
+    int i;
+
     switch (data.type) {
     case IMM_INT:
-        if (data.width == 1)
+        switch (data.width) {
+        case 1:
             out("\t.byte\t%d\n", data.d.byte);
-        else if (data.width == 2)
+            break;
+        case 2:
             out("\t.short\t%d\n", data.d.word);
-        else if (data.width == 4)
+            break;
+        case 4:
             out("\t.int\t%d\n", data.d.dword);
-        else {
-            assert(data.width == 8);
+            break;
+        case 8:
             out("\t.quad\t%ld\n", data.d.qword);
+            break;
+        default:
+            assert(data.width > 0 && data.width < 8);
+            for (i = 0; i < data.width; ++i) {
+                out("\t.byte\t%d\n", (char) (data.d.qword >> (i * 8)));
+            }
+            break;
         }
         break;
     case IMM_ADDR:
@@ -344,10 +356,10 @@ INTERNAL int asm_data(struct immediate data)
             out("\t.quad\t%s\n", sym_name(data.d.addr.sym));
         break;
     case IMM_STRING:
-        if (data.width == data.d.string.len) {
+        if (data.width == str_len(data.d.string)) {
             out("\t.ascii\t");
         } else {
-            assert(data.width == data.d.string.len + 1);
+            assert(data.width == str_len(data.d.string) + 1);
             out("\t.string\t");
         }
         fprintstr(asm_output, data.d.string);

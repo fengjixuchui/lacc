@@ -119,7 +119,7 @@ static struct asm_token asmtok(const char *line, const char **endptr)
             for (i = 0; i < array_len(&operands); ++i) {
                 op = &array_get(&operands, i);
                 raw = str_raw(op->alias);
-                if (len == op->alias.len && !strncmp(raw, ptr, len)) {
+                if (len == str_len(op->alias) && !strncmp(raw, ptr, len)) {
                     t.type = ASM_OP;
                     ptr += len + 2;
                     line = ptr;
@@ -222,7 +222,7 @@ INTERNAL enum reg get_clobbered_register(String clobber)
     struct registr reg;
 
     str = str_raw(clobber);
-    len = clobber.len;
+    len = str_len(clobber);
     if (str[0] == '%') {
         str++;
         len--;
@@ -387,10 +387,7 @@ static struct instruction parse__asm__instruction(
         }
     }
 
-    instr.opcode = mnemonic_match_operands(t.str, t.len,
-        instr.optype, &instr.source, &instr.dest);
-
-    if (instr.opcode == -1) {
+    if (!mnemonic_match_operands(t.str, t.len, &instr)) {
         error("Unrecognized instruction %s", t.str);
         exit(1);
     }
@@ -427,7 +424,7 @@ INTERNAL int assemble_inline(
         array_push_back(&targets, target);
     }
 
-    len = st.template.len;
+    len = str_len(st.template);
     str = str_raw(st.template);
     buf = calloc(len + 2, sizeof(*buf));
 
